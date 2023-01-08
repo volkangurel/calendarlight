@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "calendarlight"
+version = "0.1.0"
+description = "Control USB connected presence lights from Google Calendar events."
+authors = ["Volkan Gurel <vol.gurel@gmail.com>"]
+license = "Apache-2.0"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+busylight-for-humans = {path = "../busylight"}
+google-api-python-client = "^2.71.0"
+google-auth-httplib2 = "^0.1.0"
+google-auth-oauthlib = "^0.8.0"
+typer = {extras = ["all"], version = "^0.7.0"}
+loguru = "^0.6.0"
+pydantic = "^1.10.4"
+pyyaml = "^6.0"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.0.213"
+black = "^22.12.0"
+
+[tool.poetry.scripts]
+calendarlight="calendarlight.__main__:app"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
