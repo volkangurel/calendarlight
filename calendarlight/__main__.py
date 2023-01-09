@@ -1,4 +1,5 @@
 import asyncio
+import platform
 from dataclasses import dataclass
 from typing import List, TypeVar
 
@@ -15,12 +16,15 @@ from calendarlight.config.manager import (
 )
 from calendarlight.google.calendar import APICalendar, GoogleCalenderClient
 from calendarlight.runner.runner import Runner
+from calendarlight.service.mac import install_launchd_service, start_launchd_service, stop_launchd_service
 
 from . import __version__
 
 app = typer.Typer()
 config_app = typer.Typer()
 app.add_typer(config_app, name="config")
+service_app = typer.Typer()
+app.add_typer(service_app, name="service")
 
 config_manager = ConfigManager()
 calendar_client = GoogleCalenderClient(config_manager)
@@ -171,6 +175,27 @@ def config_remove():
 @app.command()
 def run():
     asyncio.run(Runner(config_manager, calendar_client).run())
+
+
+@service_app.command(name="install")
+def service_install():
+    system = platform.system()
+    if system == "Darwin":
+        install_launchd_service()
+
+
+@service_app.command(name="start")
+def service_start():
+    system = platform.system()
+    if system == "Darwin":
+        start_launchd_service()
+
+
+@service_app.command(name="stop")
+def service_stop():
+    system = platform.system()
+    if system == "Darwin":
+        stop_launchd_service()
 
 
 if __name__ == "__main__":
