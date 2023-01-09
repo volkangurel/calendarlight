@@ -41,7 +41,7 @@ class APICalendarEvent(pydantic.BaseModel):
     htmlLink: str
     created: str
     updated: str
-    summary: str
+    summary: str | None
     description: str | None
     start: APICalendarEventDateTime
     end: APICalendarEventDateTime

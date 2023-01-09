@@ -1,13 +1,18 @@
 import asyncio
 from dataclasses import dataclass
-from typing import List
+from typing import List, TypeVar
 
 import typer
+from busylight.color import ColorLookupError, parse_color_string
 from loguru import logger
 from rich.console import Console
-from rich.prompt import IntPrompt
+from rich.prompt import IntPrompt, Prompt
 
-from calendarlight.config.manager import ConfigManager, UserConfigCalendar
+from calendarlight.config.manager import (
+    CalendarLightConfig,
+    ConfigManager,
+    UserConfigCalendar,
+)
 from calendarlight.google.calendar import APICalendar, GoogleCalenderClient
 from calendarlight.runner.runner import Runner
 
@@ -45,6 +50,12 @@ def precommand_callback(
         is_flag=True,
         help="Enable debugging output.",
     ),
+    debug_busylight: bool = typer.Option(
+        False,
+        "--debug-busylight",
+        is_flag=True,
+        help="Enable debugging output.",
+    ),
     version: bool = typer.Option(
         False,
         "--version",
@@ -55,6 +66,7 @@ def precommand_callback(
 ) -> None:
     """Control USB connected presense lights via Google Calendar."""
 
+    (logger.enable if debug_busylight else logger.disable)("busylight")
     (logger.enable if debug else logger.disable)("calendarlight")
 
     options = ctx.ensure_object(GlobalOptions)
@@ -74,15 +86,54 @@ def login():
     config_manager.login()
 
 
+Calendar = TypeVar("Calendar", APICalendar, UserConfigCalendar)
+
+
+def print_calendars(calendars: List[Calendar]) -> Calendar:
+    if not calendars:
+        console.print("No calendars configured")
+        return
+    for index, calendar in enumerate(calendars):
+        console.print(f"[{index}] {calendar}")
+
+
+def prompt_for_calendar(prompt: str, calendars: List[Calendar]) -> Calendar:
+    print_calendars(calendars)
+
+    choice = None
+    while choice is None:
+        choice_index = IntPrompt.ask(prompt, default=0)
+        if choice_index < 0 or choice_index >= len(calendars):
+            console.print(f"Invalid choice: {choice}")
+        else:
+            choice = calendars[choice_index]
+
+    return choice
+
+
+def prompt_for_light_config() -> CalendarLightConfig | None:
+    have_config = Prompt.ask(
+        "Would you like to configure default colors for all meetings on this calendar?",
+        default="y",
+        choices=["y", "n"],
+    )
+    if have_config == "n":
+        return None
+    while True:
+        color = Prompt.ask("What color should be used when an event is on?", default="red")
+        try:
+            parse_color_string(color)
+            break
+        except ColorLookupError:
+            console.print(f"Invalid color: {color}, try again")
+            continue
+    return CalendarLightConfig(color=color)
+
+
 @config_app.command(name="list")
 def config_list():
     configured_calendars = config_manager.get_calendars()
-    if not configured_calendars:
-        console.print("No calendars configured")
-        return
-
-    for index, calendar in enumerate(configured_calendars):
-        console.print(f"[{index}] {calendar}")
+    print_calendars(configured_calendars)
 
 
 @config_app.command(name="add")
@@ -95,41 +146,26 @@ def config_add():
         if calendar.id not in [c.id for c in configured_calendars]:
             new_calendars.append(calendar)
 
-    for index, calendar in enumerate(new_calendars):
-        console.print(f"[{index}] {calendar}")
+    calendar = prompt_for_calendar("Select a calendar to add", new_calendars)
+    light_config = prompt_for_light_config()
 
-    choice = None
-    while choice is None:
-        choice_index = IntPrompt.ask("Select a calendar to add", default=0)
-        if choice_index < 0 or choice_index >= len(available_calendars.items):
-            console.print(f"Invalid choice: {choice}")
-        else:
-            choice = available_calendars.items[choice_index]
+    config_manager.add_calendar(UserConfigCalendar(id=calendar.id, summary=calendar.summary, light_config=light_config))
 
-    config_manager.add_calendar(
-        UserConfigCalendar(id=choice.id, summary=choice.summary)
-    )
+
+@config_app.command(name="edit")
+def config_edit():
+    configured_calendars = config_manager.get_calendars()
+    calendar = prompt_for_calendar("Select a calendar to edit", configured_calendars)
+    calendar.light_config = prompt_for_light_config()
+    config_manager.edit_calendar(calendar)
 
 
 @config_app.command(name="remove")
 def config_remove():
     configured_calendars = config_manager.get_calendars()
-    if not configured_calendars:
-        console.print("No calendars configured")
-        return
+    calendar = prompt_for_calendar("Select a calendar to remove", configured_calendars)
 
-    for index, calendar in enumerate(configured_calendars):
-        console.print(f"[{index}] {calendar}")
-
-    choice = None
-    while choice is None:
-        choice_index = IntPrompt.ask("Select a calendar to remove", default=0)
-        if choice_index < 0 or choice_index >= len(configured_calendars):
-            console.print(f"Invalid choice: {choice}")
-        else:
-            choice = configured_calendars[choice_index]
-
-    config_manager.remove_calendar(choice.id)
+    config_manager.remove_calendar(calendar.id)
 
 
 @app.command()

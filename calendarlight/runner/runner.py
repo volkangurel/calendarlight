@@ -3,50 +3,40 @@ import datetime
 from typing import List, Tuple
 
 import pydantic
-from busylight.color import ColorLookupError, parse_color_string
+from busylight.lights import NoLightsFound
 from busylight.manager import LightManager
 from loguru import logger
 from yaml import parser, safe_load
 
-from calendarlight.config.manager import ConfigManager
+from calendarlight.config.manager import (
+    CalendarLightConfig,
+    ConfigManager,
+    UserConfigCalendar,
+)
 from calendarlight.google.calendar import APICalendarEvent, GoogleCalenderClient
 
 # sync events from Google Calendar every 15 minutes
-CALENDAR_SYNC_PERIOD = 15 * 60  # 15 minutes
+CALENDAR_SYNC_PERIOD = 1 * 60  # 1 minutes
 
-DEFAULT_COLOR = "red"
 OFF_COLOR = (0, 0, 0)
 
 light_manager = LightManager()
 
 
-class CalenderEventConfig(pydantic.BaseModel):
-    action: str = "on"
-    color: str = DEFAULT_COLOR
-    dim: pydantic.conint(ge=0, le=100) = 100
-
-    @property
-    def rgb(self) -> Tuple[int, int, int]:
-        return parse_color_string(self.color, self.dim)
-
-    @pydantic.validator("color", pre=True, always=True)
-    def validate_color(cls, v, *, values, **kwargs):
-        try:
-            parse_color_string(v)
-            return v
-        except ColorLookupError:
-            logger.warning(f"Invalid color: {v}. Defaulting to {DEFAULT_COLOR}")
-            return DEFAULT_COLOR
+@pydantic.dataclasses.dataclass
+class LightEvent:
+    calendar: UserConfigCalendar
+    event: APICalendarEvent
 
 
 class Runner:
-    def __init__(
-        self, config_manager: ConfigManager, calendar_client: GoogleCalenderClient
-    ) -> None:
+    def __init__(self, config_manager: ConfigManager, calendar_client: GoogleCalenderClient) -> None:
         self.config_manager = config_manager
         self.calendar_client = calendar_client
 
-        self.upcoming_events: List[APICalendarEvent] = []
+        self.upcoming_events: List[LightEvent] = []
+
+        self.last_color = None
 
     def fetch_calendar_events(self):
         logger.info("Fetching events from configured calendars")
@@ -56,7 +46,7 @@ class Runner:
         for calendar in configured_calendars:
             logger.debug(f"Fetching events for: {calendar}")
             events = self.calendar_client.get_events(calendar.id)
-            all_events.extend(events.items)
+            all_events.extend([LightEvent(calendar=calendar, event=event) for event in events.items])
 
         self.upcoming_events = all_events
 
@@ -65,25 +55,27 @@ class Runner:
             await asyncio.sleep(CALENDAR_SYNC_PERIOD)
             self.fetch_calendar_events()
 
-    async def execute_schedule(self) -> int:
+    async def execute_schedule(self) -> float:
         logger.debug("Executing schedule")
         now = datetime.datetime.now(datetime.timezone.utc)
 
         active_event_config = None
 
-        for event in self.upcoming_events:
-            if event.start.dateTime < now and event.end.dateTime > now:
-                logger.debug(f"Found active event: {event}")
-                try:
-                    # retain the last event config as the active one
-                    active_event_config = CalenderEventConfig.parse_obj(
-                        safe_load(event.description or "") or {}
-                    )
-                except (pydantic.ValidationError, parser.ParserError):
-                    logger.warning(
-                        f"Skipping invalid event config: {event.description}"
-                    )
-                    continue
+        for light_event in self.upcoming_events:
+            logger.debug(f"Checking event: {light_event}")
+            if light_event.event.start.dateTime < now and light_event.event.end.dateTime > now:
+                logger.debug(f"Found active event: {light_event}")
+                if light_event.calendar.light_config is None:
+                    try:
+                        # retain the last event config as the active one
+                        active_event_config = CalendarLightConfig.parse_obj(
+                            safe_load(light_event.event.description or "") or {}
+                        )
+                    except (pydantic.ValidationError, parser.ParserError):
+                        logger.warning(f"Skipping invalid event config: {light_event.event.description}")
+                        continue
+                else:
+                    active_event_config = light_event.calendar.light_config
 
         if active_event_config is None:
             logger.debug("No active event config found. Turning light off")
@@ -95,15 +87,24 @@ class Runner:
 
         delta = datetime.timedelta(minutes=1)
         now = datetime.datetime.now(datetime.timezone.utc)
-        next_minute = (now + delta).replace(
-            microsecond=0, second=1
-        )  # 1 second past the next minute
-        wait_seconds = (next_minute - now).seconds
-        logger.debug(f"Next schedule execution at: {next_minute}")
+        next_minute = (now + delta).replace(microsecond=0, second=1)  # 1 seconds past the next minute
+        time_until_next_minute = next_minute - now
+        wait_seconds = time_until_next_minute.seconds + (next_minute - now).microseconds / 1e6
+        logger.debug(f"Next execution scheduled at: {next_minute}, waiting {wait_seconds} seconds")
         return wait_seconds
 
     async def set_light_color(self, color: Tuple[int, int, int]):
-        await light_manager.on_supervisor(color, light_manager.selected_lights())
+        if self.last_color == color:
+            logger.debug(f"Skipping light color update to {color}, color is the same")
+            return
+        logger.debug(f"Setting light color to: {color}")
+        try:
+            selected_lights = light_manager.selected_lights()
+        except NoLightsFound:
+            logger.warning("No lights found. Skipping")
+            return
+        await light_manager.on_supervisor(color, selected_lights)
+        self.last_color = color
 
     async def execute_schedule_loop(self):
         """

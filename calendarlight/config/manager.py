@@ -1,7 +1,8 @@
 import pathlib
-from typing import List
+from typing import List, Tuple
 
 import pydantic
+from busylight.color import ColorLookupError, parse_color_string
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -15,10 +16,33 @@ CONFIG_DIRECTORY = pathlib.Path.home() / ".calendarlight"
 # If modifying these scopes, delete the file token.json.
 SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
 
+DEFAULT_COLOR = "red"
+
+
+class CalendarLightConfig(pydantic.BaseModel):
+    action: str = "on"
+    color: str = DEFAULT_COLOR
+    dim: pydantic.conint(ge=0, le=100) = 100
+
+    @property
+    def rgb(self) -> Tuple[int, int, int]:
+        return parse_color_string(self.color, self.dim)
+
+    @pydantic.validator("color", pre=True, always=True)
+    def validate_color(cls, v, *, values, **kwargs):
+        try:
+            parse_color_string(v)
+            return v
+        except ColorLookupError:
+            logger.warning(f"Invalid color: {v}. Defaulting to {DEFAULT_COLOR}")
+            return DEFAULT_COLOR
+
 
 class UserConfigCalendar(pydantic.BaseModel):
     id: str
     summary: str
+
+    light_config: CalendarLightConfig | None = None
 
     def __str__(self) -> str:
         return f"{self.summary} ({self.id})"
@@ -34,9 +58,7 @@ class ConfigManager:
 
         # token
         self.token_path = CONFIG_DIRECTORY / "token.json"
-        self.auth_flow = InstalledAppFlow.from_client_secrets_file(
-            self.credentials_path, SCOPES
-        )
+        self.auth_flow = InstalledAppFlow.from_client_secrets_file(self.credentials_path, SCOPES)
 
         # token
         self.user_config_path = CONFIG_DIRECTORY / "config.yaml"
@@ -72,12 +94,14 @@ class ConfigManager:
         self.user_config.calendars.append(calendar)
         self.flush_user_config()
 
+    def edit_calendar(self, calendar: UserConfigCalendar):
+        self.user_config.calendars = [calendar if c.id == calendar.id else c for c in self.user_config.calendars]
+        self.flush_user_config()
+
     def remove_calendar(self, calendar_id: str):
-        self.user_config.calendars = [
-            c for c in self.user_config.calendars if c.id != calendar_id
-        ]
+        self.user_config.calendars = [c for c in self.user_config.calendars if c.id != calendar_id]
         self.flush_user_config()
 
     def flush_user_config(self):
         with open(self.user_config_path, "w") as f:
-            safe_dump(self.user_config.dict(), f)
+            safe_dump(self.user_config.dict(exclude_none=True), f)
